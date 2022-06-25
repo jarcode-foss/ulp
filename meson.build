@@ -9,7 +9,7 @@ app_manufacturer   = 'Jarcode'
 app_author         = 'Levi Webb'
 app_year           = '2021'
 app_email          = 'unknown'
-app_desc           = '2D Strategic Space Sim'
+app_desc           = 'An experimental and untitled lighting project'
 
 cc = meson.get_compiler('c')
 is_standalone = get_option('standalone')
