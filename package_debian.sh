@@ -3,6 +3,7 @@
 #
 # IMPORTANT: this is not meant for package maintainers
 #
+set -e
 rm -rf build
 meson build --prefix=/usr --buildtype=release
 cd build

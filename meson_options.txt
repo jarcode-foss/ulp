@@ -1,6 +1,8 @@
-option('lua_version', type: 'string', value: '5.1',
+option('glad', type: 'boolean', value: false,
+       description: 'Download and build GLAD headers (non-reproducable)')
+option('lua_version', type: 'string', value: 'auto',
        description: 'Lua version to use (implementation relative)')
-option('lua_implementation', type: 'string', value: 'lua',
+option('lua_implementation', type: 'string', value: 'luajit',
        description: 'Lua implementation to use')
 option('standalone', type: 'boolean', value: false,
        description: 'Configure build to run without installation')

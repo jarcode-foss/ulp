@@ -1,15 +1,15 @@
 # Note: all identifying application information is located in this build file
 project(
-  'computercraftedu',
+  'ulp',
   'c',
   version: run_command('git', 'describe', '--tags', '--always').stdout().strip(),
   default_options:['buildtype=release', 'strip=true', 'optimization=2'])
-formatted_app_name = 'ComputerCraftEdu'
+formatted_app_name = 'Untitled Lighting Project'
 app_manufacturer   = 'Jarcode'
 app_author         = 'Levi Webb'
-app_year           = '2020'
+app_year           = '2021'
 app_email          = 'unknown'
-app_desc           = 'Minecraft modified with ComputerCraftEdu'
+app_desc           = '2D Strategic Space Sim'
 
 cc = meson.get_compiler('c')
 is_standalone = get_option('standalone')
@@ -21,8 +21,7 @@ find_program('sed')
 find_program('awk')
 find_program('head')
 find_program('bash')
-# NOTE: disabled
-# iheaders = find_program('iheaders')
+iheaders = find_program('iheaders')
 if host_machine.system() == 'windows'
   find_program('wixl')
   find_program('wixl-heat')
@@ -30,6 +29,7 @@ endif
 
 if get_option('buildtype').startswith('debug')
   add_project_arguments('-DAPP_DEBUG', language: 'c')
+  add_project_arguments('-ggdb', language: 'c')
 else
   # Hide symbols in non-debug builds
   add_project_arguments('-fvisibility=hidden', language: 'c')
@@ -43,9 +43,16 @@ elif host_machine.system() == 'osx'
 endif
 
 app_dependencies = [
-  dependency('threads', static: static_libs),
-  dependency('libcurl', static: static_libs)
+  dependency('threads',   static: static_libs),
+  dependency('libcurl',   static: static_libs),
+  dependency('freetype2',   static: static_libs),
+  dependency('glfw3',   static: static_libs),
+  cc.find_library('atomic', static: static_libs)
 ]
+
+if host_machine.system() != 'windows'
+  app_dependencies += dependency('threads', static: static_libs)
+endif
 
 app_link_args = []
 
@@ -123,6 +130,58 @@ elif is_standalone
   sys_config_dir    = '../config'
 endif
 
+# fcontext has arch-specific asm, determine the files for the host machine
+if host_machine.system() == 'osx'
+  asm_arch = 'combined'
+  asm_ext = 'all_macho_gas.S'
+else
+  if host_machine.cpu_family() == 'x86'
+    asm_arch = 'i386'
+  elif host_machine.cpu_family() == 'ppc'
+    asm_arch = 'ppc32'
+  elif host_machine.cpu_family() == 'mips'
+    asm_arch = 'mips32_o32'
+  elif host_machine.cpu_family() == 'mips64'
+    asm_arch = 'mips64_n64'
+  elif host_machine.cpu_family() == 'arm'
+    asm_arch = 'arm_aapcs'
+  elif host_machine.cpu_family() == 'arm64'
+    asm_arch = 'arm64_aapcs'
+  else
+    asm_arch = host_machine.cpu_family()
+  endif
+  
+  if host_machine.system() == 'windows'
+    if meson.get_compiler('c').get_id() == 'clang'
+      asm_ext = 'ms_pe_clang_gas.S'
+    elif meson.get_compiler('c').get_id() == 'msvc'
+      asm_ext = 'ms_pe_masm.asm'
+    elif meson.get_compiler('c').get_id() == 'gcc'
+      asm_ext = 'ms_pe_gas.S'
+    else
+      error('unsupported compiler')
+    endif
+  else #unixes
+    asm_ext = 'sysv_elf_gas.S'
+  endif
+endif
+asm_sources = [ 'src/asm/make_'  + asm_arch + '_' + asm_ext,
+                'src/asm/jump_'  + asm_arch + '_' + asm_ext,
+                'src/asm/ontop_' + asm_arch + '_' + asm_ext ]
+asm_missing_arch = false
+foreach s: asm_sources
+  if run_command('[', '-f', s, ']').returncode() != 0
+    asm_missing_arch = true
+    break
+  endif
+endforeach
+if asm_missing_arch
+  message('`fcontext` does not have support on the host architecture (' + host_machine.cpu_family() + '), '
+          + 'using `ucontext` instead. This can severely reduce scheduler performance.')
+  add_project_arguments('-DAPP_USE_SYSTEM_UCONTEXT', language: ['c'])
+  asm_sources = []
+endif
+
 # Generator and target for lua objects.
 # This has been written such that ninja can detect when sources need to be rebuilt.
 
@@ -155,30 +214,35 @@ endif
 luac_args    = ['-o', '@OUTPUT@', '@INPUT@']
 lua_impl     = get_option('lua_implementation')
 lua_ver      = get_option('lua_version')
-# Automatically grab latest lua version from the system, even if pkg-config cannot find it.
-# This provides a hassle-free interface for building with multiple versions of lua, even
-# detecting mingw lua installations.
-if lua_ver == 'auto'
-  # Try letting meson find it
-  if lua_ver != 'any'
-    nver_parts = lua_ver.split('.')
-    collected = []
-    idx = 0
-    foreach part: nver_parts
-      if idx == nver_parts.length() - 1
-        collected += part.to_int() + 1
-      else
-        collected += part.to_int()
-      endif
-      idx = idx + 1
-    endforeach
-    lua_ver_next = '.'.join(collected)
-    message('Search criteria: [>=' + lua_ver + ', <' + lua_ver_next + ']')
-    mcheck = dependency(lua_impl, static: static_libs, required: false,
-                        version: ['>=' + lua_ver, '<' + lua_ver_next])
-  else
-    mcheck = dependency(lua_impl, static: static_libs, required: false)
+
+if lua_ver != 'auto'
+  # Search for the latest lua version that satisfies the version specified
+  nver_parts = lua_ver.split('.')
+  collected = []
+  idx = 0
+  foreach part: nver_parts
+    if idx == nver_parts.length() - 1
+      collected += (part.to_int() + 1).to_string()
+    else
+      collected += (part.to_int()).to_string()
+    endif
+    idx = idx + 1
+  endforeach
+  lua_ver_next = '.'.join(collected)
+  message('Search criteria: [>=' + lua_ver + ', <' + lua_ver_next + ']')
+  mcheck = dependency(lua_impl, static: static_libs, required: false,
+                      version: ['>=' + lua_ver, '<' + lua_ver_next])
+  if mcheck.found()
+    lua_ver = mcheck.version()
+    message('Located packaged lua version: ' + lua_ver)
   endif
+else
+  # Automatically grab latest lua version from the system, even if pkg-config cannot find it.
+  # This provides a hassle-free interface for building with multiple versions of lua, even
+  # detecting mingw lua installations.
+  
+  # Try letting meson find it
+  mcheck = dependency(lua_impl, static: static_libs, required: false)
   if mcheck.found()
     lua_ver = mcheck.version()
     message('Located packaged lua version: ' + lua_ver)
@@ -191,7 +255,7 @@ if lua_ver == 'auto'
     lua_ichecks = []
     if lua_impl == 'luajit'
       if host_machine.system() == 'windows'
-        lua_ichecks = ['luajit-*.*.dll', 'luajit-*.*.dll.a']
+        lua_ichecks = ['luajit-*.*.dll', 'luajit-*.*.dll.a', 'libluajit-*.*.dll.a']
       else
         lua_ichecks = ['libluajit-*.*.so.*']
       endif
@@ -306,6 +370,8 @@ add_project_arguments(
   # Pass the path for loading lua modules so the stub loading code can ensure
   # that it is present in `package.path`
   '-DAPP_LUA_PATH="' + resource_dir_base + '/' + lua_mod_base + '"',
+  '-DAPP_LUA_INCLUDE=' + lua_inc,
+  '-DAPP_LUA_LANG_VERSION=' + lua_ver_s,
   language: ['c'])
 
 run_command(find_program('rm'), '-rf', meson.build_root() + '/luac-out.p')
@@ -323,11 +389,12 @@ run_command(find_program('ln'), '-sfT', '/'.join(depth_arr) + '/luac-out.p',
 # This really hacky piece of code allows Meson to recursively track all lua
 # sources and their corresponding compiled objects. Because of how generators
 # work, the source tree structure has to be collapsed into a single directory;
-# we resolve conflicts by preceding files with a hash and building an association
-# table with the old paths.
+# we resolve conflicts by preceding files with a string and building an
+# association table with the old paths.
 #
-# This is quite useful anyway since it obfuscates the functionality of the binary
-# somewhat, and allows us to generate a table of files at build time.
+# This is quite useful since it allows us to avoid some platform-specific
+# characteristics for handling file/directory names, and allows us to generate
+# a table of files at build time.
 g_prog    = find_program(luac_name)
 g_output  = '@BASENAME@.' + luac_output_ext
 g_args    = luac_args
@@ -352,11 +419,15 @@ foreach source: run_command(
   endforeach
   pre = '/'.join(sorted)
   if parts.length() > 2
-    # generate file prefix format for directory structure
-    fmt = run_command('./lua_fmt.sh', pre).stdout().strip() + '-'
+    # Generate file prefix format for directory structure
+    fmt = run_command('./scripts/lua_fmt.sh', pre, check: true).stdout().strip() + '__'
   else
-    # root directory can just use a unique prefix
-    fmt = '0-'
+    # Root directory can just use a unique prefix
+    if host_machine.system() == 'windows'
+      fmt = '__' # avoid conflicts with Windows filename restrictions
+    else
+      fmt = '' # unix filenames are quite permissive, use no prefix for root files
+    endif
   endif
   fn = basename.split('.')
   if sorted.length() > 0
@@ -378,14 +449,23 @@ foreach arg: g_args
   endif
 endforeach
 
-run_command('mkdir', '-p', meson.build_root() + '/luac-out.p')
-run_command('./lua_index.sh', luac_name + ' ' + ' '.join(g_p), lua_index)
+run_command('mkdir', '-p', meson.build_root() + '/luac-out.p', check: true)
+run_command('./scripts/lua_index.sh', luac_name + ' ' + ' '.join(g_p), lua_index, check: true)
 
+# This target does two things: first, it evaluates all of our luac generators into a
+# target that we can use later. The results are stored in `[build_dir]/[output].p`,
+# and we update a dummy file to make ninja build dependencies to it.
+#
+# Second, it calls a script that removes all but the most nessecary regenerate rules
+# from its own the `build.ninja` file. Meson seems to toss various files into
+# regenerate rules if it thinks the `meson.build` itself depends on them, which it
+# is incredibly liberal with guessing. This fixes constant regeneration caused by
+# both lua and assembly sources.
 luac_target = custom_target(
   'app-luac',
   input:            objs,
   output:           'luac-out',
-  command:          [find_program('touch'), 'luac-out'],
+  command:          [meson.source_root() + '/scripts/disable_regenerate.sh', meson.build_root(), 'luac-out'],
   build_by_default: true)
 
 # This fun little hack is to deal with systems where luajit is named
@@ -394,6 +474,7 @@ luac_target = custom_target(
 # different naming schemes for standard lua.
 lua_found = '?'
 if get_option('lua_implementation') == 'luajit'
+  lj_l3_available = true
   if host_machine.system() == 'osx'
     lj_l1 = cc.find_library(lua_impl + lua_ver_s, required: false,
                             dirs: meson.get_cross_property('osx_library_path'),
@@ -401,19 +482,40 @@ if get_option('lua_implementation') == 'luajit'
     lj_l2 = cc.find_library(lua_inc,              required: false,
                             dirs: meson.get_cross_property('osx_library_path'),
                             static: static_libs)
+    lj_l3_available = false
   else
-    lj_l1 = cc.find_library(lua_impl + lua_ver_s, required: false, static: static_libs)
-    lj_l2 = cc.find_library(lua_inc,              required: false, static: static_libs)
+    
+    # temporary fix for AUR package
+    prefix = ''
+    suffix = ''
+    if host_machine.system() == 'windows'
+      prefix = 'lib'
+      suffix = '.dll.a'
+    endif
+    # end temporary fix
+    
+    lj_l1 = cc.find_library(prefix + lua_impl + lua_ver_s + suffix, required: false, static: static_libs)
+    lj_l2 = cc.find_library(prefix + lua_inc + suffix,              required: false, static: static_libs)
+    if static_libs == true
+      lj_l3 = cc.find_library(get_option('lua_implementation'), required: false, static: true)
+    else
+      lj_l3_available = false
+    endif
   endif
-  assert(lj_l1.found() == true or lj_l2.found() == true,
-         'Could not locate library name "' + lua_impl + lua_ver_s
-         + '" or "' + lua_inc + '". Is it installed?')
+  assert(lj_l1.found() == true or lj_l2.found() == true or lj_l3.found() == true,
+         'Could not locate LuaJIT for the target platform. Is it installed?')
   app_dependencies += [lj_l1, lj_l2]
+  if lj_l3_available
+    app_dependencies += lj_l3
+  endif
   if lj_l1.found()
     lua_found = lua_impl + lua_ver_s
   endif
   if lj_l2.found()
     lua_found = lua_inc
+  endif
+  if lj_l3_available and lj_l3.found()
+    lua_found = get_option('lua_implementation') + ' (static, version unknown)'
   endif
 else
   list = [lua_impl + lua_ver_s, lua_impl + ''.join(lua_ver_s.split('.')),
@@ -446,7 +548,7 @@ if host_machine.system() == 'windows'
     'app-win-icon-resource',
     input: 'resources.rc',
     output: 'resources.o',
-    command: [meson.source_root() + '/generate_resources.sh',
+    command: [meson.source_root() + '/scripts/generate_resources.sh',
               find_program('windres').full_path(), '@INPUT@', meson.source_root(), '@OUTDIR@',
               formatted_app_name, app_version, app_manufacturer, app_author,
               meson.project_name(), app_desc],
@@ -454,57 +556,95 @@ if host_machine.system() == 'windows'
   pre_objects += meson.build_root() + '/resources.o'
 endif
 
-run_command('mkdir', '-p', meson.build_root() + '/headers')
-
 sources = run_command(
-  'find', 'src', '-type', 'f', '-name', '*.c', '-print'
+  'find', 'src', '-type', 'f', '-name', '*.c', '-print',
+  check: true
 ).stdout().strip().split('\n')
 
-# Generate headers on every compilation. The parsing is extremely fast so the performance
-# overhead isn't worth trying to minimize.
-# NOTE: disabled on this project
-# 
-# pre_targets += run_target('iheaders',
-#                           command: ['iheaders', '-d', meson.build_root() + '/headers',
-#                                     '-r', meson.source_root() + '/src', '-G'] + sources)
-# 
+# Generate headers in a custom rule.
+#
+# Ideally, this should be integrated into the backend, but backends scan header dependencies
+# before the build, so running iheaders as a `custom_target` produces inconsistent results.
+# Note that iheaders itself detects changes within the header output and preserves modification
+# flags to signal to ninja when the contents actually change, saving compilation time.
+#
+# As a result, most recompiles should use `ninja -C build iheaders && ninja -C build`
+
+prepended_sources = []
+foreach source: sources
+  prepended_sources += (meson.source_root() + '/' + source)
+endforeach
+run_target(
+  'iheaders',
+  command: ['iheaders', '-d', meson.build_root() + '/headers',
+            '-r', meson.source_root() + '/src', '-G', prepended_sources])
+
+# Always generate headers on new builds
+if run_command('[', '-d', meson.build_root() + '/headers', ']').returncode() != 0
+  message('Generating headers for new build')
+  run_command('mkdir', '-p', meson.build_root() + '/headers', check: true)
+  run_command('iheaders', '-d', meson.build_root() + '/headers',
+              '-r', meson.source_root() + '/src', '-G', sources)
+endif
+
 # Strip source files with `iheaders`, and collapse the source tree paths into
 # filenames separated by `@` characters (meson workaround)
-# NOTE: disabled on this project
-# 
-# stripped_sources = []
-# foreach source: sources
-#   parts = source.split('/')
-#   i = 0
-#   sorted = []
-#   foreach part: parts
-#     if i != 0 and i != parts.length() - 1
-#       sorted += part
-#     endif
-#     i += 1
-#   endforeach
-#   pre = '@'.join(sorted)
-#   stripped_sources += generator(iheaders, output: pre + '@@BASENAME@.c',
-#             arguments: ['-d', '@BUILD_DIR@', '-p', '-P', pre + '@', '@INPUT@']).process(source)
-# endforeach
-#
-# NOTE: remove following line if iheader functionality enabled
-stripped_sources = sources
+
+stripped_sources = []
+foreach source: sources
+  parts = source.split('/')
+  i = 0
+  sorted = []
+  foreach part: parts
+    if i != 0 and i != parts.length() - 1
+      sorted += part
+    endif
+    i += 1
+  endforeach
+  pre = '@'.join(sorted)
+  stripped_sources += generator(iheaders, output: pre + '@@BASENAME@.c',
+                                arguments: ['-d', '@BUILD_DIR@', '-p', '-P', pre + '@', '@INPUT@']
+                               ).process(source)
+endforeach
 
 unix_install_dir = 'bin'
 if host_machine.system() == 'osx'
   unix_install_dir = '.'
 endif
 
+#run_command('touch', 'build/iheaders-dummy.h')
+#dummy_lib = static_library('dummy', generated_headers, build_by_default: true)
+#dummy_dep = declare_dependency(link_with: dummy_lib, include_directories: dummy_lib.private_dir_include())
+#app_dependencies += dummy_dep
+
+# Compile & run unit tests
+tests = run_command(
+  'find', 'tests', '-type', 'f', '-name', '*.c', '-print',
+  check: true
+).stdout().strip().split('\n')
+foreach test: tests
+  binary = executable(
+    test.split('/')[1].split('.')[0],
+    link_depends: [pre_targets, luac_target],
+    link_args:    pre_objects,
+    sources: [stripped_sources, asm_sources, test],
+    dependencies: app_dependencies,
+    include_directories: [include_directories('build/headers'),
+                          include_directories('build'),
+                          include_directories('src')])
+  test(test.split('/')[1].split('.')[0], binary)
+endforeach
+
+
 exec_target = executable(
   meson.project_name(),
   link_depends: pre_targets,
   link_args:    pre_objects,
-  sources:      stripped_sources,
+  sources:      [stripped_sources, asm_sources, 'entry/entry_wrapper.c'],
   dependencies: app_dependencies,
-  c_args:      ['-I' + meson.source_root() + '/src',
-                '-I' + meson.build_root()  + '/headers',
-                '-I' + lua_inc_path + lua_inc],
+  include_directories: [include_directories('build/headers'),
+                        include_directories('build'),
+                        include_directories('src')],
   install:      true,
   install_dir:  unix_install_dir)
 
@@ -519,17 +659,18 @@ if host_machine.system() == 'windows'
     'app-win-msi',
     depends: [exec_target, luac_target],
     output: msi_output + '.msi',
-    command: [meson.source_root() + '/generate_package.sh', meson.source_root(),
+    command: [meson.source_root() + '/scripts/generate_msi.sh', meson.source_root(),
               meson.build_root(), lua_sdir, msi_output,
               formatted_app_name, app_version, app_manufacturer, app_author,
-              meson.project_name() + '.exe', app_year, meson.get_cross_property('wixl_arch')],
+              meson.project_name() + '.exe', app_year, meson.get_cross_property('wixl_arch'),
+              host_machine.cpu_family()],
     build_by_default: true)
 elif host_machine.system() == 'linux' and not is_standalone
   custom_target(
     'app-freedesktop-entry',
     input: 'prototype-entry.desktop',
     output: meson.project_name() + '.desktop',
-    command: [meson.source_root() + '/generate_entry.sh',
+    command: [meson.source_root() + '/scripts/generate_entry.sh',
               '@INPUT@', '@OUTDIR@',
               meson.project_name(), formatted_app_name, app_desc,
               get_option('prefix') + '/' + get_option('bindir') + '/' + meson.project_name(),
@@ -537,20 +678,20 @@ elif host_machine.system() == 'linux' and not is_standalone
     build_by_default: true,
     install: true,
     install_dir: resource_dir_base + '/applications')
-  run_command('./generate_pkgbuild.sh', meson.build_root(), meson.project_name(),
-              meson.project_version(), app_desc)
+  run_command('./scripts/generate_pkgbuild.sh', meson.build_root(), meson.project_name(),
+              meson.project_version(), app_desc, check: true)
   debian_arch_map = { 'x86_64' :'amd64',
                       'i686'   :'i386', # debian uses i386 as the identifier but requires i686
                       'x86'    :'i386' }
   arch_str = host_machine.cpu_family()
   arch_str = debian_arch_map.get(arch_str, arch_str)
-  run_command('./generate_deb.sh', meson.build_root(), meson.project_name(),
+  run_command('./scripts/generate_deb.sh', meson.build_root(), meson.project_name(),
               meson.project_version(), app_desc, app_author, app_email, app_year,
-             arch_str)
+             arch_str, check: true)
 elif host_machine.system() == 'osx' and not is_standalone
-  run_command('./generate_pkg.sh', meson.build_root(), meson.project_name(),
+  run_command('./scripts/generate_pkg.sh', meson.build_root(), meson.project_name(),
               meson.project_version(), app_desc, app_author, app_email, app_year,
-              app_manufacturer, formatted_app_name)
+              app_manufacturer, formatted_app_name, check: true)
 endif
 
 if (host_machine.system() == 'osx' or host_machine.system() == 'linux') and not is_standalone
@@ -565,5 +706,6 @@ summary({ 'Standalone': is_standalone,
           'Lua Implementation': get_option('lua_implementation'),
           'Lua Version': lua_ver,
           'Platform': host_machine.system() + ' ' + host_machine.cpu()
-                      + ' (' + host_machine.endian() + ' endian)'},
+                      + ' (' + host_machine.endian() + ' endian)',
+          'Build Type': get_option('buildtype')},
         section: '[Configuration]')
